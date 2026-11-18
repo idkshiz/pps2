@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PS2 in a tab (PCSX2 WASM) v5</title>
+<!-- On GitHub Pages this adds the security headers (the file must sit next to this page). Harmless 404 elsewhere. -->
+<script src="coi-serviceworker.js"></script>
+<style>
+:root{--bg:#0a0d14;--panel:#121826;--line:#243049;--ink:#e8edf8;--dim:#8d9ac0;--accent:#5b8cff;--ok:#7be0b8;--bad:#ff8f8f;color-scheme:dark}
+@media (prefers-color-scheme:light){:root{--bg:#eef1f8;--panel:#fff;--line:#c8d1ea;--ink:#131a2d;--dim:#55628a;--accent:#2b57e6;--ok:#0b7a58;--bad:#b3261e;color-scheme:light}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 "Avenir Next","Segoe UI",system-ui,sans-serif;padding:16px}
+main{max-width:1000px;margin:0 auto;display:grid;gap:14px}
+h1{font-size:1.4rem;margin:0}
+p,small{margin:0;color:var(--dim)}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;display:grid;gap:10px}
+.row{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(230px,1fr))}
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+button,.btn{background:var(--accent);color:#fff;border:0;border-radius:6px;padding:9px 14px;font:inherit;font-weight:600;cursor:pointer}
+button.alt,.btn.alt{background:transparent;color:var(--ink);border:1px solid var(--line)}
+button:disabled{opacity:.45;cursor:not-allowed}
+input[type=file]{display:none}
+:focus-visible{outline:2px solid var(--ok);outline-offset:2px}
+#stage{position:relative;background:#000;border-radius:10px;aspect-ratio:4/3;overflow:hidden;display:grid;place-items:center;outline:none}
+#stage.focus{box-shadow:0 0 0 2px var(--ok)}
+#stage:fullscreen{border-radius:0;aspect-ratio:auto}
+canvas{width:100%;height:100%;object-fit:contain;image-rendering:auto;display:block}
+canvas.crisp{image-rendering:pixelated}
+#slate{white-space:pre-line;position:absolute;inset:0;display:grid;place-items:center;text-align:center;color:#9aa6c8;padding:20px;pointer-events:none}
+#status{font:.82rem ui-monospace,Menlo,Consolas,monospace;color:var(--dim)}
+#log{font:.78rem/1.4 ui-monospace,Menlo,Consolas,monospace;color:var(--dim);max-height:160px;overflow:auto;white-space:pre-wrap;margin:0}
+.ok{color:var(--ok)}.bad{color:var(--bad)}
+table{border-collapse:collapse;font-size:.85rem;width:100%}
+td{padding:2px 10px 2px 0;color:var(--dim)}td:nth-child(even){color:var(--ink);font-weight:600}
+details summary{cursor:pointer;color:var(--dim)}
+label.f{display:grid;gap:4px;font-size:.85rem;color:var(--dim)}
+select{background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:7px;font:inherit}
+input[type=range]{width:100%}
+#padlist{display:grid;gap:8px}
+#padmsg{color:var(--ok)}
+</style>
+</head>
+<body>
+<main>
+<header>
+  <h1>PS2 in a tab</h1>
+  <p>A single-file frontend for a PCSX2 WebAssembly build. Your BIOS and games stay on this device; nothing is uploaded.</p>
+</header>
+
+<section class="panel">
+  <div class="row">
+    <div class="bar"><label class="btn alt" for="biosIn">Choose BIOS</label><input type="file" id="biosIn"><small id="biosName">No BIOS yet</small></div>
+    <div class="bar"><label class="btn alt" for="discIn">Choose disc</label><input type="file" id="discIn" accept=".iso,.bin,.img,.chd,.cso,.zso,.gz"><small id="discName">No disc (opens the BIOS menu)</small></div>
+  </div>
+  <div class="bar">
+    <button id="boot" disabled>Boot</button>
+    <button id="stop" class="alt" disabled>Stop</button>
+    <button id="save" class="alt" disabled>Save state</button>
+    <label class="btn alt" for="loadIn" id="loadLbl">Load state</label><input type="file" id="loadIn" accept=".p2s">
+    <button id="mute" class="alt">Sound on</button>
+    <button id="crisp" class="alt">Smooth</button>
+    <button id="full" class="alt">Fullscreen</button>
+  </div>
+  <div id="status">Loading emulator…</div>
+</section>
+
+<section class="panel">
+  <div class="row">
+    <label class="f">Resolution (lower = lighter on old PCs)
+      <select id="res">
+        <option value="640x448">Native 640×448</option>
+        <option value="512x364">Medium 512×364</option>
+        <option value="384x272">Low 384×272</option>
+        <option value="320x224">Lowest 320×224</option>
+      </select></label>
+    <label class="f">Underclock (game runs slower but steadier)
+      <select id="uc"><option value="0">Off</option><option value="-1">75%</option><option value="-2">60%</option><option value="-3">50%</option></select></label>
+    <label class="f">Keyboard plays as
+      <select id="kbport"><option value="0">Player 1</option><option value="1">Player 2</option></select></label>
+    <label class="f">Stick deadzone
+      <input type="range" id="dead" min="0" max="50" value="15"></label>
+  </div>
+  <label class="bar"><input type="checkbox" id="rum" checked> Rumble (where the browser supports it)</label>
+  <div id="padlist"></div>
+  <small id="padmsg"></small>
+</section>
+
+<div id="stage" tabindex="0" aria-label="PS2 screen. Click to play, Escape to release the keyboard.">
+  <canvas id="screen" width="640" height="448"></canvas>
+  <div id="slate">Pick a BIOS, then press Boot.</div>
+</div>
+
+<section class="panel">
+  <details><summary>Controls</summary>
+  <table>
+    <tr><td>D-pad</td><td>Arrow keys</td><td>Start / Select</td><td>Enter / Backspace</td></tr>
+    <tr><td>Cross / Circle</td><td>K / L</td><td>Square / Triangle</td><td>J / I</td></tr>
+    <tr><td>L1 / R1</td><td>Q / E</td><td>L2 / R2</td><td>1 / 3</td></tr>
+    <tr><td>Left stick</td><td>W A S D</td><td>Right stick</td><td>T F G H</td></tr>
+    <tr><td>Release keyboard</td><td>Esc</td><td>Mute / Fullscreen</td><td>M / double-click</td></tr>
+  </table>
+  <small>Gamepads with the standard layout also work (Player 1).</small></details>
+  <pre id="log" aria-live="polite"></pre>
+</section>
+</main>
+
+<script>
+"use strict";
+/* Files expected next to this page (from the TabStationToo build or site):
+   pcsx2-wasm.js, pcsx2-wasm.wasm, pcsx2-wasm.data, disc-worker.js
+   Optional: coi-serviceworker.js (adds the isolation headers on static hosts).
+   Use ?base=/some/path/ to load them from another folder on the same origin. */
+const BASE = new URLSearchParams(location.search).get("base") || "./";
+const $ = id => document.getElementById(id);
+const logEl = $("log");
+function log(t, c){ const s=document.createElement("span"); if(c) s.className=c; s.textContent=t+"\n"; logEl.append(s); while(logEl.childNodes.length>400) logEl.firstChild.remove(); logEl.scrollTop=logEl.scrollHeight; }
+const setStatus = (t, c) => { $("status").textContent = t; $("status").className = c || ""; };
+const slate = t => { $("slate").style.display = t ? "grid" : "none"; $("slate").textContent = t || ""; };
+
+/* ---------- tiny IndexedDB store (BIOS + memory card) ---------- */
+const db = new Promise(res => {
+  try { const r = indexedDB.open("ps2-pcsx2-web", 1); r.onupgradeneeded = () => r.result.createObjectStore("kv"); r.onsuccess = () => res(r.result); r.onerror = r.onblocked = () => res(null); }
+  catch (e) { res(null); }
+});
+const kv = {
+  async get(k){ const d = await db; if (!d) return undefined; return new Promise(r => { try { const q = d.transaction("kv").objectStore("kv").get(k); q.onsuccess = () => r(q.result); q.onerror = () => r(undefined); } catch (e) { r(undefined); } }); },
+  async set(k, v){ const d = await db; if (!d) return false; return new Promise(r => { try { const t = d.transaction("kv", "readwrite"); t.objectStore("kv").put(v, k); t.oncomplete = () => r(true); t.onerror = () => r(false); } catch (e) { r(false); } }); }
+};
+
+/* ---------- emulator plumbing ---------- */
+let ready = false, running = false, bios = null, disc = null, worker = null, rid = 0, ctx = null, gain = null, muted = false;
+const pend = new Map();
+const X = (n, ...a) => {
+  const f = Module["_" + n] || (Module.wasmExports && Module.wasmExports[n]) || (Module.asm && Module.asm[n]);
+  if (typeof f !== "function") throw new Error("This emulator build does not export \"" + n + "\".");
+  return f(...a);
+};
+const MEM = () => Module.wasmMemory || (Module.wasmExports && Module.wasmExports.memory) || (Module.asm && Module.asm.memory);
+const u8 = () => new Uint8Array(MEM().buffer);
+function cstr(s){
+  const b = new TextEncoder().encode(s + "\0");
+  const mal = Module._malloc || Module._emscripten_builtin_malloc || (Module.wasmExports && (Module.wasmExports.malloc || Module.wasmExports.emscripten_builtin_malloc));
+  if (!mal) throw new Error("This build exports neither ccall nor malloc, so text can't be passed to it.");
+  const p = mal(b.length); u8().set(b, p); return p;
+}
+/* Call an export where some arguments are strings. Prefers Emscripten's ccall, which handles the memory itself. */
+function S(name, ...args){
+  if (typeof Module.ccall === "function")
+    return Module.ccall(name, "number", args.map(a => typeof a === "string" ? "string" : "number"), args);
+  return X(name, ...args.map(a => typeof a === "string" ? cstr(a) : a));
+}
+function ensureDir(d){ try { Module.FS.mkdir(d); } catch(e){} }
+
+function refresh(){
+  $("boot").disabled = !(ready && bios) || running;
+  $("stop").disabled = !running; $("save").disabled = !running; $("loadLbl").style.opacity = running ? 1 : .45;
+}
+
+const REMOTE = "https://tabstationtoo.github.io/TabStationToo/";
+const FILES = ["pcsx2-wasm.js", "pcsx2-wasm.wasm", "pcsx2-wasm.data", "disc-worker.js"];
+const blobs = {};
+const fileUrl = n => blobs[n] || BASE + n;
+async function hasLocal(){
+  for (const f of FILES) {
+    try { const r = await fetch(BASE + f, { method: "HEAD" }); const t = r.headers.get("content-type") || ""; if (!r.ok || t.includes("text/html")) return false; } catch (e) { return false; }
+  }
+  return true;
+}
+async function getRemote(){
+  let cache = null; try { cache = await caches.open("ps2-emulator-v1"); } catch (e) {}
+  for (let i = 0; i < FILES.length; i++) {
+    const n = FILES[i], url = REMOTE + n;
+    setStatus("Downloading emulator (" + (i + 1) + "/" + FILES.length + "): " + n + (i === 2 ? " (the big one, only the first time)" : ""));
+    let res = cache ? await cache.match(url) : null;
+    if (!res) {
+      res = await fetch(url, { mode: "cors" });
+      if (!res.ok) throw new Error(n + ": HTTP " + res.status);
+      if (cache) { try { await cache.put(url, res.clone()); } catch (e) {} }
+    }
+    const type = n.endsWith(".js") ? "text/javascript" : n.endsWith(".wasm") ? "application/wasm" : "application/octet-stream";
+    blobs[n] = URL.createObjectURL(new Blob([await res.arrayBuffer()], { type }));
+  }
+  log("Emulator files downloaded from " + REMOTE, "ok");
+}
+async function preflight(){
+  if (location.protocol === "file:") {
+    setStatus("Host this page on a web server, not as a file.", "bad");
+    log("Opened from disk (file://). Browsers block the emulator's threads there. Host the page on Netlify or Cloudflare Pages with the _headers file, or run ps2-web.py on a computer.", "bad");
+    return false;
+  }
+  if (!crossOriginIsolated) {
+    setStatus("This host doesn't send the security headers the emulator needs.", "bad");
+    log("Needs Cross-Origin-Opener-Policy: same-origin and Cross-Origin-Embedder-Policy: require-corp. On Netlify or Cloudflare Pages add a _headers file with those two lines for /*.", "bad");
+    try { const r = await fetch("coi-serviceworker.js", { method: "HEAD" }); if (!r.ok) log("coi-serviceworker.js was not found next to this page (HTTP " + r.status + "). Upload it to the same folder as index.html.", "bad"); else log("coi-serviceworker.js is there but isolation did not turn on. Reload once; if it persists, clear this site's data (lock icon > Site settings) and reload, and avoid private windows.", "bad"); } catch (e) {}
+    return false;
+  }
+  if (await hasLocal()) return true;
+  try { await getRemote(); return true; }
+  catch (e) {
+    setStatus("Could not get the emulator files: " + e.message, "bad");
+    log("Download from " + REMOTE + " failed (" + e.message + "). The site may have moved or be blocked on this network. You can also put " + FILES.join(", ") + " next to this page.", "bad");
+    return false;
+  }
+}
+function loadEmulator(){
+  if (!crossOriginIsolated) {
+    log("This page is not cross-origin isolated, so the emulator's threads can't start. Serve it with COOP/COEP headers, or put coi-serviceworker.js next to it.", "bad");
+    const s = document.createElement("script"); s.src = BASE + "coi-serviceworker.js"; document.head.append(s);
+    setStatus("Needs cross-origin isolation (see log)", "bad"); return;
+  }
+  window.Module = {
+    locateFile: p => fileUrl(p),
+    mainScriptUrlOrBlob: blobs["pcsx2-wasm.js"],
+    print: t => log(t), printErr: t => log(t),
+    onAbort: w => { setStatus("The emulator crashed while loading. See the log.", "bad"); log("Abort: " + w, "bad"); },
+    postRun: [async () => {
+      try {
+        ensureDir("/bios"); ensureDir("/disc"); ensureDir("/memcards"); ensureDir("/states");
+        worker = new Worker(fileUrl("disc-worker.js"));
+        worker.onmessage = e => { const d = e.data; if (d.type === "reply" && pend.has(d.id)) { pend.get(d.id)(d); pend.delete(d.id); } };
+        const r = await post({ type: "attach", memory: MEM(), block: X("pcsx2web_disc_block") });
+        if (!r.ok) throw new Error("Disc worker: " + (r.error && r.error.message || r.error));
+        ready = true; setStatus("Emulator ready.", "ok"); refresh(); loop();
+      } catch (e) { log(e.message, "bad"); setStatus(e.message, "bad"); }
+    }]
+  };
+  const s = document.createElement("script"); s.src = fileUrl("pcsx2-wasm.js");
+  s.onerror = () => { setStatus("Could not load " + BASE + "pcsx2-wasm.js", "bad"); log("Put the emulator files next to this page (or use ?base=).", "bad"); };
+  document.head.append(s);
+  setTimeout(() => { if (!ready) { setStatus("Still not loaded after 40 s. Press F12 and check the Console for errors.", "bad"); log("Stalled: pcsx2-wasm.js loaded but the runtime never finished starting. Common causes: .wasm/.data missing or served with the wrong type, or a build that isn't the pcsx2-wasm target.", "bad"); } }, 40000);
+}
+function post(msg){ return new Promise(res => { const id = ++rid; pend.set(id, res); worker.postMessage({ ...msg, id }); }); }
+
+/* ---------- BIOS and disc ---------- */
+async function setBios(file){
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  bios = { name: file.name, bytes };
+  $("biosName").textContent = file.name; await kv.set("bios", { name: file.name, bytes }); refresh();
+}
+$("biosIn").onchange = e => e.target.files[0] && setBios(e.target.files[0]);
+$("discIn").onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  disc = f; $("discName").textContent = f.name;
+  if (running) { setStatus("Swap discs from the emulator menu; the new disc applies on the next boot.", ""); }
+};
+addEventListener("dragover", e => e.preventDefault());
+addEventListener("drop", e => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (!f) return; if (/\.(iso|bin|img|chd|cso|zso|gz)$/i.test(f.name)) { disc = f; $("discName").textContent = f.name; } else setBios(f); });
+
+/* ---------- audio ---------- */
+function startAudio(){
+  try {
+    ctx = new AudioContext({ sampleRate: 48000 }); gain = ctx.createGain(); gain.gain.value = muted ? 0 : 1; gain.connect(ctx.destination);
+    Module.pcsx2webAudioContext = ctx;
+    Module.pcsx2webAudioReady = node => { if (node) node.connect(gain); else log("Sound could not start.", "bad"); };
+    X("pcsx2web_audio_start");
+  } catch (e) { log("Sound: " + e.message, "bad"); }
+}
+
+/* ---------- boot / stop ---------- */
+$("boot").onclick = async () => {
+  $("boot").disabled = true;
+  try {
+    ensureDir("/bios"); Module.FS.writeFile("/bios/" + bios.name, bios.bytes);
+    await restoreCard(); applyRes(); applyUc();
+    let rc;
+    if (disc) {
+      setStatus("Opening " + disc.name + "…");
+      const r = await post({ type: "open", file: disc, name: disc.name });
+      if (!r.ok) throw new Error("Disc: " + (r.error && r.error.message || r.error));
+      const path = "/disc/" + disc.name; Module.FS.writeFile(path, new Uint8Array(0));
+      rc = S("pcsx2web_boot_disc", bios.name, path, 0);
+    } else rc = S("pcsx2web_boot", bios.name);
+    if (rc !== 0) throw new Error("The emulator refused to boot. Check the log (is this a PS2 BIOS?).");
+    if (!ctx) startAudio(); else ctx.resume();
+    running = true; gotFrame = false; bootAt = performance.now(); slate("Starting…"); $("stage").focus(); refresh();
+  } catch (e) { log(e.message, "bad"); setStatus(e.message, "bad"); refresh(); }
+};
+$("stop").onclick = () => { X("pcsx2web_stop"); persistCard(); };
+
+/* ---------- memory card (card 1, kept in this browser) ---------- */
+const CARD = "/memcards/card1.ps2";
+async function restoreCard(){
+  try {
+    const saved = await kv.get("card1");
+    if (saved) Module.FS.writeFile(CARD, saved);
+    S("pcsx2web_memcard", 0, CARD, "card1");
+  } catch (e) { log("Memory card: " + e.message, "bad"); }
+}
+let lastCard = 0;
+async function persistCard(){
+  try { const b = Module.FS.readFile(CARD); await kv.set("card1", b); lastCard = Date.now(); } catch (e) {}
+}
+setInterval(() => { if (running) persistCard(); }, 10000);
+addEventListener("pagehide", () => { if (running) persistCard(); });
+
+/* ---------- save states (.p2s files) ---------- */
+$("save").onclick = async () => {
+  const p = "/states/quick.p2s"; S("pcsx2web_save_state", p);
+  const before = X("pcsx2web_state_result"); setStatus("Saving state…");
+  for (let i = 0; i < 100 && X("pcsx2web_state_result") === before; i++) await new Promise(r => setTimeout(r, 100));
+  if ((X("pcsx2web_state_result") & 1) === 0) { setStatus("Saving failed (a memory card was written a moment ago?). Try again.", "bad"); return; }
+  const url = URL.createObjectURL(new Blob([Module.FS.readFile(p)]));
+  Object.assign(document.createElement("a"), { href: url, download: "state.p2s" }).click(); URL.revokeObjectURL(url);
+  setStatus("State saved as state.p2s", "ok");
+};
+$("loadIn").onchange = async e => {
+  const f = e.target.files[0]; if (!f || !running) return;
+  Module.FS.writeFile("/states/load.p2s", new Uint8Array(await f.arrayBuffer()));
+  S("pcsx2web_load_state", "/states/load.p2s"); setStatus("Loading state…"); e.target.value = "";
+};
+
+/* ---------- screen ---------- */
+const cv = $("screen"), g = cv.getContext("2d");
+let lastSeq = 0, surfaceSent = false, gotFrame = false, bootAt = 0, portBound = null, gpuFrames = 0;
+/* WebGPU path: the emulator posts finished frames as ImageBitmaps on Module.tstFramePort. */
+function attachPort(){
+  const pt = Module.tstFramePort; if (!pt || pt === portBound) return; portBound = pt;
+  pt.onmessage = e => {
+    let bm = e.data;
+    if (!(bm instanceof ImageBitmap)) bm = e.data && (e.data.bitmap || e.data.frame || Object.values(e.data).find(v => v instanceof ImageBitmap));
+    if (!bm) return;
+    if (cv.width !== bm.width || cv.height !== bm.height) { cv.width = bm.width; cv.height = bm.height; }
+    g.drawImage(bm, 0, 0); try { bm.close(); } catch (er) {}
+    if (!gpuFrames) log("First WebGPU frame arrived.", "ok");
+    gpuFrames++; gotFrame = true; slate("");
+  };
+  if (pt.start) pt.start();
+  log("Using the WebGPU display path.");
+}
+function drawFrame(){
+  const m = MEM().buffer, d = X("pcsx2web_frame") >>> 2, w32 = new Uint32Array(m);
+  const seq = Atomics.load(w32, d); if (seq === lastSeq || seq === 0) return;
+  const w = w32[d + 1], h = w32[d + 2], px = w32[d + 3]; if (!w || !h || !px) return;
+  const img = new ImageData(w, h); img.data.set(new Uint8Array(m, px, w * h * 4));
+  if (Atomics.load(w32, d) !== seq) return;           // overwritten while copying
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  g.putImageData(img, 0, 0); lastSeq = seq; gotFrame = true; slate("");
+}
+const stateNames = ["waiting", "starting", "running", "stopped", "failed"];
+let lastPoll = 0;
+function loop(){
+  requestAnimationFrame(loop);
+  try {
+    if (!surfaceSent) { applyRes(); surfaceSent = true; }
+    if (running) { attachPort(); drawFrame(); }
+    if (running || wiz) pads();
+    const now = performance.now();
+    if (now - lastPoll > 500) {
+      lastPoll = now;
+      const st = X("pcsx2web_state");
+      if (running) {
+        if (st >= 3) { running = false; persistCard(); slate(st === 4 ? "The emulator stopped with an error. See the log." : "Stopped. Press Boot to start again."); setStatus("State: " + stateNames[st], st === 4 ? "bad" : ""); refresh(); }
+        else {
+          const sp = X("pcsx2web_speed"), vps = X("pcsx2web_vps");
+          setStatus("State: " + stateNames[st] + " · speed " + sp + "% · " + vps + " vsync/s");
+          const t = Math.round((now - bootAt) / 1000);
+          if (!gotFrame && t > 8) slate("No picture yet (" + t + " s). State: " + stateNames[st] + ", " + vps + " vsync/s, speed " + sp + "%.\n" +
+            (vps === 0 ? "The emulator isn't running frames. Check the log below for errors." : "It is running but slow; first frames can take a minute on a weak device.") +
+            (portBound ? "" : "\n(Waiting for the display connection.)"));
+        }
+      }
+    }
+  } catch (e) { /* the module may not be fully up yet */ }
+}
+
+/* ---------- input ---------- */
+const KEYS = { ArrowUp:"Up",ArrowDown:"Down",ArrowLeft:"Left",ArrowRight:"Right",KeyK:"Cross",KeyL:"Circle",KeyJ:"Square",KeyI:"Triangle",
+  Enter:"Start",Backspace:"Select",KeyQ:"L1",KeyE:"R1",Digit1:"L2",Digit3:"R2",Digit2:"L3",Digit4:"R3",
+  KeyW:"LUp",KeyS:"LDown",KeyA:"LLeft",KeyD:"LRight",KeyT:"RUp",KeyG:"RDown",KeyF:"RLeft",KeyH:"RRight" };
+const ids = {};
+const padId = n => ids[n] ?? (ids[n] = S("pcsx2web_pad_input", n));
+let kbPort = 0;
+const sendPad = (n, v, port = kbPort) => X("pcsx2web_pad", port, padId(n), v);
+const stage = $("stage");
+stage.onfocus = () => stage.classList.add("focus"); stage.onblur = () => { stage.classList.remove("focus"); releaseAll(); };
+const held = new Set();
+function releaseAll(){ if (!ready) return; held.forEach(n => { try { sendPad(n, 0); } catch(e){} }); held.clear(); }
+stage.addEventListener("keydown", e => {
+  if (e.code === "Escape") { stage.blur(); return; }
+  if (e.code === "KeyM") { toggleMute(); return; }
+  if (e.ctrlKey || e.metaKey || e.altKey || e.code.startsWith("F")) return;
+  const n = KEYS[e.code]; if (!n) return; e.preventDefault();
+  if (running && !held.has(n)) { held.add(n); sendPad(n, 1); }
+});
+stage.addEventListener("keyup", e => { const n = KEYS[e.code]; if (!n) return; e.preventDefault(); if (held.has(n)) { held.delete(n); if (running) sendPad(n, 0); } });
+stage.addEventListener("click", () => stage.focus());
+stage.addEventListener("dblclick", () => toggleFull());
+
+const GP = ["Cross","Circle","Square","Triangle","L1","R1","L2","R2","Select","Start","L3","R3","Up","Down","Left","Right"];
+const MAPSTEPS = [...GP, "LUp","LDown","LLeft","LRight","RUp","RDown","RLeft","RRight"];
+const gpLast = {}, ports = {}, maps = {};
+let dead = .15, rumbleOn = true, wiz = null;
+const store = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} };
+const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch(e){ return d; } };
+Object.assign(ports, load("ps2ports", {})); Object.assign(maps, load("ps2maps", {}));
+const padList = () => navigator.getGamepads ? [...navigator.getGamepads()].filter(Boolean) : [];
+const portKey = p => p.id + "#" + p.index;
+const portFor = p => ports[portKey(p)] ?? Math.min(p.index, 1);
+const scale = v => Math.max(0, Math.min(1, (v - dead) / (1 - dead)));
+function setIf(port, n, v){ const k = port + n; if (gpLast[k] !== v) { gpLast[k] = v; sendPad(n, v, port); } }
+function readPad(p){
+  const port = portFor(p), map = maps[p.id];
+  if (map) {
+    for (const n of MAPSTEPS) { const m = map[n]; if (!m) { setIf(port, n, 0); continue; }
+      setIf(port, n, m.b != null ? (p.buttons[m.b] ? p.buttons[m.b].value : 0) : scale((p.axes[m.a] || 0) * m.d)); }
+  } else if (p.mapping === "standard") {
+    GP.forEach((n, i) => setIf(port, n, p.buttons[i] ? p.buttons[i].value : 0));
+    const ax = (a, neg, pos) => { const v = p.axes[a] || 0; setIf(port, neg, scale(-v)); setIf(port, pos, scale(v)); };
+    ax(0, "LLeft", "LRight"); ax(1, "LUp", "LDown"); ax(2, "RLeft", "RRight"); ax(3, "RUp", "RDown");
+  }
+}
+function pressed(p){ const d = new Set(); p.buttons.forEach((b, i) => { if (b.value > .6) d.add("b" + i); }); p.axes.forEach((a, i) => { if (Math.abs(a - (wiz.base[i] || 0)) > .7) d.add("a" + i); }); return d; }
+function startWiz(p){
+  wiz = { id: p.id, index: p.index, i: 0, map: {}, base: [...p.axes], down: null };
+  wiz.down = pressed(p); releaseAll();
+}
+function wizAdvance(){ wiz.i++; if (wiz.i >= MAPSTEPS.length) { maps[wiz.id] = wiz.map; store("ps2maps", maps); wiz = null; $("padmsg").textContent = "Controller mapped."; renderPads(); } }
+function wizTick(p){
+  $("padmsg").textContent = "Mapping: press " + MAPSTEPS[wiz.i] + " (Space skips, Esc cancels)";
+  const now = pressed(p); let hit = null;
+  now.forEach(k => { if (!wiz.down.has(k)) { const i = +k.slice(1); hit = k[0] === "b" ? { b: i } : { a: i, d: Math.sign(p.axes[i] - (wiz.base[i] || 0)) }; } });
+  wiz.down = now;
+  if (hit) { wiz.map[MAPSTEPS[wiz.i]] = hit; wizAdvance(); }
+}
+addEventListener("keydown", e => {
+  if (!wiz) return;
+  if (e.code === "Space") { e.preventDefault(); wizAdvance(); }
+  if (e.code === "Escape") { wiz = null; $("padmsg").textContent = "Mapping cancelled."; }
+});
+function pads(){
+  const list = padList();
+  for (const p of list) { if (wiz && wiz.index === p.index) wizTick(p); else readPad(p); }
+  rumble(list);
+}
+let vibAddr = 0; const lastRum = {};
+function rumble(list){
+  if (!rumbleOn) return;
+  try {
+    if (!vibAddr) vibAddr = X("pcsx2web_pad_vibration") >>> 2;
+    const w = new Uint32Array(MEM().buffer), now = performance.now();
+    for (const p of list) {
+      const v = Atomics.load(w, vibAddr + portFor(p)), last = lastRum[p.index] || { v: 0, t: 0 };
+      if (v === last.v && !(v && now - last.t > 800)) continue;
+      lastRum[p.index] = { v, t: now };
+      const act = p.vibrationActuator;
+      if (act && act.playEffect) act.playEffect("dual-rumble", { startDelay: 0, duration: v ? 1000 : 50, strongMagnitude: ((v >> 8) & 255) / 255, weakMagnitude: (v & 255) / 255 }).catch(() => {});
+    }
+  } catch (e) {}
+}
+function renderPads(){
+  const el = $("padlist"); el.textContent = ""; const list = padList();
+  if (!list.length) { const s = document.createElement("small"); s.textContent = "No controller detected. Press a button on it."; el.append(s); return; }
+  list.forEach(p => {
+    const row = document.createElement("div"); row.className = "bar";
+    const nm = document.createElement("small"); nm.textContent = p.id.slice(0, 48) + (maps[p.id] ? " (custom map)" : p.mapping === "standard" ? "" : " (needs mapping)");
+    const sel = document.createElement("select"); sel.innerHTML = '<option value="0">Player 1</option><option value="1">Player 2</option>';
+    sel.value = portFor(p); sel.onchange = () => { releaseAll(); ports[portKey(p)] = +sel.value; store("ps2ports", ports); };
+    const mb = document.createElement("button"); mb.className = "alt"; mb.textContent = "Map…"; mb.onclick = () => startWiz(p);
+    row.append(nm, sel, mb);
+    if (maps[p.id]) { const rb = document.createElement("button"); rb.className = "alt"; rb.textContent = "Reset map"; rb.onclick = () => { delete maps[p.id]; store("ps2maps", maps); renderPads(); }; row.append(rb); }
+    el.append(row);
+  });
+}
+addEventListener("gamepadconnected", renderPads); addEventListener("gamepaddisconnected", renderPads);
+$("kbport").onchange = () => { releaseAll(); kbPort = +$("kbport").value; store("ps2kb", kbPort); };
+$("dead").oninput = () => { dead = $("dead").value / 100; store("ps2dead", dead); };
+$("rum").onchange = () => { rumbleOn = $("rum").checked; store("ps2rum", rumbleOn); };
+
+/* ---------- performance ---------- */
+function applyRes(){ const [w, h] = $("res").value.split("x").map(Number); try { X("pcsx2web_surface_size", w, h, 1); } catch(e){} }
+function applyUc(){ try { X("pcsx2web_set_ee_cycle_rate", +$("uc").value); } catch(e){} }
+$("res").onchange = () => { applyRes(); store("ps2res", $("res").value); };
+$("uc").onchange = () => { applyUc(); store("ps2uc", $("uc").value); };
+
+/* ---------- misc controls ---------- */
+function toggleMute(){ muted = !muted; if (gain) gain.gain.value = muted ? 0 : 1; $("mute").textContent = muted ? "Sound off" : "Sound on"; }
+function toggleFull(){ if (document.fullscreenElement) document.exitFullscreen(); else stage.requestFullscreen && stage.requestFullscreen(); }
+$("mute").onclick = toggleMute; $("full").onclick = toggleFull;
+let crisp = false;
+$("crisp").onclick = () => { crisp = !crisp; cv.classList.toggle("crisp", crisp); $("crisp").textContent = crisp ? "Crisp" : "Smooth"; try { X("pcsx2web_set_crisp", crisp ? 1 : 0); } catch(e){} };
+
+/* ---------- start ---------- */
+(async () => {
+  let saved; try { saved = await kv.get("bios"); } catch (e) {}
+  if (saved) { bios = saved; $("biosName").textContent = saved.name; }
+  $("res").value = load("ps2res", "640x448"); $("uc").value = load("ps2uc", "0");
+  kbPort = load("ps2kb", 0); $("kbport").value = kbPort;
+  dead = load("ps2dead", .15); $("dead").value = Math.round(dead * 100);
+  rumbleOn = load("ps2rum", true); $("rum").checked = rumbleOn;
+  renderPads();
+  refresh();
+  if (await preflight()) loadEmulator();
+  log("Page version 5 (display fix).");
+  log("If the emulator files are not next to this page, they are downloaded from the TabStationToo site.");
+})();
+</script>
+</body>
+</html>
